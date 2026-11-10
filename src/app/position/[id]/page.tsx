@@ -49,6 +49,7 @@ export default function PositionDetailPage({
   const [notes, setNotes] = useState<string>("");
   const [savingRules, setSavingRules] = useState<boolean>(false);
   const [rulesSuccess, setRulesSuccess] = useState<boolean>(false);
+  const [rulesError, setRulesError] = useState<string | null>(null);
 
   const fetchDetail = async () => {
     setLoading(true);
@@ -103,6 +104,7 @@ export default function PositionDetailPage({
     e.preventDefault();
     setSavingRules(true);
     setRulesSuccess(false);
+    setRulesError(null);
 
     try {
       const res = await fetch(`/api/positions/${id}`, {
@@ -123,9 +125,11 @@ export default function PositionDetailPage({
         setRulesSuccess(true);
         setTimeout(() => setRulesSuccess(false), 3000);
         fetchDetail();
+      } else {
+        setRulesError(json.error || "保存失败");
       }
     } catch (err) {
-      console.warn("Save rules error:", err);
+      setRulesError(String(err));
     } finally {
       setSavingRules(false);
     }
@@ -449,6 +453,13 @@ export default function PositionDetailPage({
               />
             </div>
 
+            {rulesError && (
+              <div className="p-2.5 rounded-lg bg-red-950/60 border border-red-800 text-red-300 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{rulesError}</span>
+              </div>
+            )}
+
             {rulesSuccess && (
               <div className="p-2.5 rounded-lg bg-emerald-950/60 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
@@ -579,10 +590,11 @@ export default function PositionDetailPage({
           positionId={id}
           symbol={pos.symbol}
           name={pos.name}
+          market={pos.market}
           currentPrice={currentPrice}
           currentHardLine={hardLine}
           lots={lots}
-          totalCapital={100000}
+          totalCapital={data.totalCapital || 100000}
           onClose={() => setShowAddModal(false)}
           onSuccess={() => fetchDetail()}
         />

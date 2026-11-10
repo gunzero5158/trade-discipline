@@ -505,11 +505,10 @@ export default function DashboardPage() {
           currentPrice={closeTarget.currentPrice}
           weightedCost={closeTarget.weightedCost}
           totalShares={closeTarget.totalShares}
-          initial1R={
-            closeTarget.lots.find((l) => l.type === "initial")
-              ? (closeTarget.lots[0].price - closeTarget.lots[0].stopPrice) * closeTarget.lots[0].shares
-              : 1000
-          }
+          initial1R={(() => {
+            const initLot = closeTarget.lots.find((l) => l.type === "initial") || closeTarget.lots[0];
+            return initLot ? (initLot.price - initLot.stopPrice) * initLot.shares : 1000;
+          })()}
           suggestedAction={closeTarget.snapshot?.nextAction}
           onClose={() => setCloseTarget(null)}
           onSuccess={() => fetchDashboardData(true)}
@@ -522,6 +521,7 @@ export default function DashboardPage() {
           positionId={addTarget.position.id}
           symbol={addTarget.position.symbol}
           name={addTarget.position.name}
+          market={addTarget.position.market as any}
           currentPrice={addTarget.currentPrice}
           currentHardLine={addTarget.snapshot?.hardLinePrice ?? addTarget.position.initialStopPrice}
           lots={addTarget.lots.map((l) => ({

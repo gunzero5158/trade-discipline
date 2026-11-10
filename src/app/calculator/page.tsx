@@ -85,6 +85,7 @@ function CalculatorContent() {
     const urlName = searchParams.get("name");
     const urlMaType = searchParams.get("maType");
     const urlMaPeriod = searchParams.get("maPeriod");
+    const urlConfirm = searchParams.get("confirm");
 
     if (urlSymbol) setSymbol(urlSymbol);
     if (urlName) setName(urlName);
@@ -104,6 +105,7 @@ function CalculatorContent() {
     }
     if (urlMaType) setMaType(urlMaType === "MA" ? "MA" : "EMA");
     if (urlMaPeriod) setMaPeriod(parseInt(urlMaPeriod, 10) || 20);
+    if (urlConfirm) setConfirmDays(parseInt(urlConfirm, 10) || 1);
   }, [searchParams]);
 
   // 搜索股票联想

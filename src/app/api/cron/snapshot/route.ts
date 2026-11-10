@@ -19,7 +19,9 @@ async function handleCronSnapshot(req: NextRequest) {
   if (expectedSecret) {
     const authHeader = req.headers.get("authorization");
     const cronHeader = req.headers.get("x-cron-secret");
-    const token = authHeader?.replace(/^Bearer\s+/i, "") || cronHeader;
+    const { searchParams } = new URL(req.url);
+    const querySecret = searchParams.get("secret");
+    const token = authHeader?.replace(/^Bearer\s+/i, "") || cronHeader || querySecret;
 
     if (token !== expectedSecret) {
       return NextResponse.json({ success: false, error: "未授权 Cron 任务" }, { status: 401 });
@@ -34,6 +36,18 @@ async function handleCronSnapshot(req: NextRequest) {
       .select()
       .from(schema.positions)
       .where(eq(schema.positions.status, "open"));
+
+    const allAccounts = await db.select().from(schema.accounts);
+    const accountConfigMap = new Map<string, any>();
+    for (const acc of allAccounts) {
+      if (acc.ruleConfigJson) {
+        try {
+          accountConfigMap.set(acc.id, JSON.parse(acc.ruleConfigJson));
+        } catch {
+          // ignore
+        }
+      }
+    }
 
     let successful = 0;
     let failed = 0;
@@ -62,7 +76,7 @@ async function handleCronSnapshot(req: NextRequest) {
           .select()
           .from(schema.snapshots)
           .where(eq(schema.snapshots.positionId, pos.id))
-          .orderBy(desc(schema.snapshots.date))
+          .orderBy(desc(schema.snapshots.createdAt))
           .limit(1);
 
         const candles = await fetchDailyCandles(pos.symbol, 120);
@@ -95,6 +109,7 @@ async function handleCronSnapshot(req: NextRequest) {
           position: rulePos,
           candles,
           yesterdayHardLine: lastSnap.length > 0 ? lastSnap[0].hardLinePrice : pos.initialStopPrice,
+          config: accountConfigMap.get(pos.accountId),
         });
 
         // 写入新快照

@@ -3,12 +3,13 @@
 import { useState } from "react";
 import { X, PlusCircle, AlertTriangle } from "lucide-react";
 import { calculateAddPosition } from "@/lib/rules/calculator";
-import { Lot } from "@/lib/rules/types";
+import { Lot, MarketRegion } from "@/lib/rules/types";
 
 interface AddModalProps {
   positionId: string;
   symbol: string;
   name: string;
+  market?: MarketRegion;
   currentPrice: number;
   currentHardLine: number;
   lots: Lot[];
@@ -21,6 +22,7 @@ export default function AddModal({
   positionId,
   symbol,
   name,
+  market = "a-share",
   currentPrice,
   currentHardLine,
   lots,
@@ -52,7 +54,7 @@ export default function AddModal({
         totalCapital,
         currentHardLine,
         avgAmplitude: 0.02,
-        market: "a-share",
+        market,
       });
     } catch (err: unknown) {
       calcError = String(err);

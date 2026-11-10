@@ -16,6 +16,7 @@ export interface SoftLineInput {
   confirmDays: number;           // 确认天数 (默认 1 或 2)
   stage: number;                 // 当前阶段 (0, 1, 2, 3)
   accelerationLocked?: boolean;  // 是否已被加速段锁定
+  customMaPeriod?: boolean;      // 用户是否显式定制了均线周期 (若未定制且为默认20，阶段2/3自动切10日线)
   config?: RuleConfig;
 }
 
@@ -128,12 +129,16 @@ export function calculateSoftLine(input: SoftLineInput): SoftLineResult {
   let effectivePeriod = input.maPeriod;
   let accelerationMode = !!input.accelerationLocked;
 
-  // 阶段 2 与阶段 3 的均线规则
+  // 阶段 2 与阶段 3 的均线规则：若使用的是默认 20 日均线且未单独定制，阶段 2/3 自动收紧为 10 日线；若用户定制了其他周期 (如 60 日线) 则尊重定制
+  const isDefaultPeriod = !input.customMaPeriod && input.maPeriod === 20;
   if (input.stage === 2) {
-    // 阶段 2 默认 10 日线
-    effectivePeriod = 10;
+    if (isDefaultPeriod) {
+      effectivePeriod = 10;
+    }
   } else if (input.stage >= 3) {
-    effectivePeriod = 10;
+    if (isDefaultPeriod) {
+      effectivePeriod = 10;
+    }
 
     // 检查加速段条件 (文档 3.3 节与疑问 5 修复)
     // 条件：最近 3 个交易日每天收盘涨幅都超过近 20 日平均振幅，且收盘价高于 10 日线 8% 以上

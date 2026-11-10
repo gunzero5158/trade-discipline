@@ -33,6 +33,15 @@ export async function GET(req: NextRequest) {
 
     let allLots: typeof schema.lots.$inferSelect[] = [];
     let allSnapshots: typeof schema.snapshots.$inferSelect[] = [];
+    const allUserPosIds = rawPositions.map((p) => p.id);
+    let userTrades: typeof schema.trades.$inferSelect[] = [];
+
+    if (allUserPosIds.length > 0) {
+      userTrades = await db
+        .select()
+        .from(schema.trades)
+        .where(inArray(schema.trades.positionId, allUserPosIds));
+    }
 
     if (posIds.length > 0) {
       allLots = await db
@@ -51,7 +60,7 @@ export async function GET(req: NextRequest) {
     const items = [];
     let totalOpenRiskAmount = 0;
     let totalUnrealizedPnL = 0;
-    let totalInitialRisk = 0;
+    let sumUnrealizedR = 0;
 
     for (const pos of openPositions) {
       const lotsForPos: Lot[] = allLots
@@ -67,6 +76,9 @@ export async function GET(req: NextRequest) {
           riskPercent: l.riskPercent,
           notes: l.notes,
         }));
+
+      const tradesForPos = userTrades.filter((t) => t.positionId === pos.id);
+      const alreadyClosedShares = tradesForPos.reduce((acc, t) => acc + t.shares, 0);
 
       // 最新快照
       let latestSnapshot = allSnapshots.find((s) => s.positionId === pos.id);
@@ -182,19 +194,21 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      // 计算该持仓汇总
-      let totalShares = 0;
+      // 计算该持仓汇总 (扣减已部分平仓的股数)
+      let totalBoughtShares = 0;
       let totalCostAmount = 0;
       for (const l of lotsForPos) {
-        totalShares += l.shares;
+        totalBoughtShares += l.shares;
         totalCostAmount += l.shares * l.price;
       }
-      const weightedCost = totalShares > 0 ? totalCostAmount / totalShares : 0;
+      const weightedCost = totalBoughtShares > 0 ? totalCostAmount / totalBoughtShares : 0;
+      const totalShares = Math.max(0, totalBoughtShares - alreadyClosedShares);
+      const currentCostAmount = totalShares * weightedCost;
       const currentPrice = latestSnapshot?.closePrice ?? weightedCost;
       const unrealizedPnL = totalShares * (currentPrice - weightedCost);
       const unrealizedRatio = weightedCost > 0 ? (currentPrice - weightedCost) / weightedCost : 0;
 
-      // 未实现风险 = max(0, (成本 - 硬线) * 股数)
+      // 未实现风险 = max(0, (成本 - 硬线) * 剩余股数)
       const hardLine = latestSnapshot?.hardLinePrice ?? pos.initialStopPrice;
       const unreleasedRisk = Math.max(0, (weightedCost - hardLine) * totalShares);
       totalOpenRiskAmount += unreleasedRisk;
@@ -202,15 +216,15 @@ export async function GET(req: NextRequest) {
 
       const initialLot = lotsForPos.find((l) => l.type === "initial") || lotsForPos[0];
       const initial1R = initialLot ? initialLot.shares * (initialLot.price - initialLot.stopPrice) : 1000;
-      totalInitialRisk += initial1R;
       const unrealizedR = initial1R > 0 ? unrealizedPnL / initial1R : 0;
+      sumUnrealizedR += unrealizedR;
 
       items.push({
         position: pos,
         lots: lotsForPos,
         totalShares,
         weightedCost: Number(weightedCost.toFixed(2)),
-        totalCostAmount: Number(totalCostAmount.toFixed(2)),
+        totalCostAmount: Number(currentCostAmount.toFixed(2)),
         currentPrice: Number(currentPrice.toFixed(2)),
         unrealizedPnL: Number(unrealizedPnL.toFixed(2)),
         unrealizedRatio: Number(unrealizedRatio.toFixed(4)),
@@ -228,19 +242,10 @@ export async function GET(req: NextRequest) {
       return distA - distB;
     });
 
-    // 统计当月已实现盈亏
-    const userTrades = await db
-      .select()
-      .from(schema.trades);
-
-    // 过滤属于该用户持仓的平仓记录
-    const allUserPosIds = rawPositions.map((p) => p.id);
-    const matchedTrades = userTrades.filter((t) => allUserPosIds.includes(t.positionId));
-
     const currentYearMonth = new Date().toISOString().substring(0, 7); // YYYY-MM
     let thisMonthRealizedPnL = 0;
     let thisMonthRealizedR = 0;
-    for (const t of matchedTrades) {
+    for (const t of userTrades) {
       if (t.exitDate.startsWith(currentYearMonth)) {
         thisMonthRealizedPnL += t.pnlAmount;
         thisMonthRealizedR += t.rMultiple;
@@ -249,7 +254,7 @@ export async function GET(req: NextRequest) {
 
     const totalCapital = session.account.totalCapital;
     const totalOpenRiskPercent = Number((totalOpenRiskAmount / totalCapital * 100).toFixed(2));
-    const totalUnrealizedR = totalInitialRisk > 0 ? Number((totalUnrealizedPnL / (totalInitialRisk / (items.length || 1))).toFixed(2)) : 0;
+    const totalUnrealizedR = Number(sumUnrealizedR.toFixed(2));
 
     return NextResponse.json({
       success: true,

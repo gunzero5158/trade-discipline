@@ -3,6 +3,8 @@ import { getSessionAccount } from "@/lib/auth/session";
 import { ensureDbReady, schema } from "@/lib/db";
 import { eq, desc } from "drizzle-orm";
 import { fetchDailyCandles } from "@/lib/market/client";
+import { evaluatePositionRules } from "@/lib/rules/engine";
+import { Lot, Position as RulePosition } from "@/lib/rules/types";
 
 export async function GET(
   req: NextRequest,
@@ -39,7 +41,7 @@ export async function GET(
       .select()
       .from(schema.snapshots)
       .where(eq(schema.snapshots.positionId, id))
-      .orderBy(desc(schema.snapshots.date))
+      .orderBy(desc(schema.snapshots.createdAt))
       .limit(60);
 
     const trades = await db
@@ -48,14 +50,17 @@ export async function GET(
       .where(eq(schema.trades.positionId, id))
       .orderBy(desc(schema.trades.exitDate));
 
-    // 计算加权成本与总股数
-    let totalShares = 0;
+    // 计算加权成本与剩余股数 (扣减已部分平仓股数)
+    let totalBoughtShares = 0;
     let totalCostAmount = 0;
     for (const l of lots) {
-      totalShares += l.shares;
+      totalBoughtShares += l.shares;
       totalCostAmount += l.shares * l.price;
     }
-    const weightedCost = totalShares > 0 ? totalCostAmount / totalShares : 0;
+    const alreadyClosedShares = trades.reduce((acc, t) => acc + t.shares, 0);
+    const totalShares = Math.max(0, totalBoughtShares - alreadyClosedShares);
+    const weightedCost = totalBoughtShares > 0 ? totalCostAmount / totalBoughtShares : 0;
+    const currentCostAmount = totalShares * weightedCost;
 
     return NextResponse.json({
       success: true,
@@ -64,10 +69,11 @@ export async function GET(
         lots,
         snapshots,
         trades,
+        totalCapital: session.account.totalCapital,
         summary: {
           totalShares,
           weightedCost: Number(weightedCost.toFixed(2)),
-          totalCostAmount: Number(totalCostAmount.toFixed(2)),
+          totalCostAmount: Number(currentCostAmount.toFixed(2)),
         },
       },
     });
@@ -102,12 +108,34 @@ export async function PATCH(
       return NextResponse.json({ success: false, error: "持仓不存在" }, { status: 404 });
     }
 
+    const pos = position[0];
+
+    // 获取最新快照以校验人工硬线不能低于当前硬线
+    const latestSnapList = await db
+      .select()
+      .from(schema.snapshots)
+      .where(eq(schema.snapshots.positionId, id))
+      .orderBy(desc(schema.snapshots.createdAt))
+      .limit(1);
+    const currentHardLine = latestSnapList.length > 0 ? latestSnapList[0].hardLinePrice : pos.initialStopPrice;
+
     const updates: Partial<typeof schema.positions.$inferInsert> = {
       updatedAt: Date.now(),
     };
 
     if (body.manualStopPrice !== undefined) {
-      updates.manualStopPrice = body.manualStopPrice !== null ? Number(body.manualStopPrice) : null;
+      if (body.manualStopPrice !== null) {
+        const newManual = Number(body.manualStopPrice);
+        if (newManual < currentHardLine) {
+          return NextResponse.json(
+            { success: false, error: `铁律限制：人工硬线 (${newManual}) 不能低于当前生效硬线 (${currentHardLine})，硬线只升不降！` },
+            { status: 400 }
+          );
+        }
+        updates.manualStopPrice = newManual;
+      } else {
+        updates.manualStopPrice = null;
+      }
     }
     if (body.maType !== undefined) {
       updates.maType = body.maType === "MA" ? "MA" : "EMA";
@@ -136,7 +164,77 @@ export async function PATCH(
       .set(updates)
       .where(eq(schema.positions.id, id));
 
-    return NextResponse.json({ success: true, message: "持仓规则已更新" });
+    // 规则修改后立即重新评估并写入新快照
+    try {
+      const updatedPos = { ...pos, ...updates };
+      const lots = await db.select().from(schema.lots).where(eq(schema.lots.positionId, id));
+      const lotsForPos: Lot[] = lots.map((l) => ({
+        id: l.id,
+        positionId: l.positionId,
+        type: l.type as any,
+        date: l.date,
+        price: l.price,
+        shares: l.shares,
+        stopPrice: l.stopPrice,
+        riskPercent: l.riskPercent,
+      }));
+
+      const candles = await fetchDailyCandles(updatedPos.symbol, 120);
+      if (candles.length > 0) {
+        const rulePos: RulePosition = {
+          id: updatedPos.id,
+          accountId: updatedPos.accountId,
+          symbol: updatedPos.symbol,
+          name: updatedPos.name,
+          market: updatedPos.market as any,
+          status: updatedPos.status as any,
+          initialStopPrice: updatedPos.initialStopPrice,
+          maType: updatedPos.maType as any,
+          maPeriod: updatedPos.maPeriod,
+          confirmDays: updatedPos.confirmDays,
+          manualStopPrice: updatedPos.manualStopPrice,
+          maxStage: updatedPos.maxStage,
+          stage3Trimmed: !!updatedPos.stage3Trimmed,
+          targetPrice: updatedPos.targetPrice,
+          accelerationLocked: !!updatedPos.accelerationLocked,
+          lots: lotsForPos,
+          createdAt: new Date(updatedPos.createdAt).toISOString(),
+          updatedAt: new Date(updatedPos.updatedAt).toISOString(),
+        };
+
+        const evalSnapshot = evaluatePositionRules({
+          position: rulePos,
+          candles,
+          yesterdayHardLine: currentHardLine,
+          config: session.account.ruleConfig,
+        });
+
+        await db.insert(schema.snapshots).values({
+          id: `snap_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          positionId: id,
+          date: evalSnapshot.date,
+          closePrice: evalSnapshot.closePrice,
+          highPrice: evalSnapshot.highPrice,
+          costPrice: evalSnapshot.costPrice,
+          maxGainRatio: evalSnapshot.maxGainRatio,
+          stage: evalSnapshot.stage,
+          hardLinePrice: evalSnapshot.hardLinePrice,
+          hardLineDistancePercent: evalSnapshot.hardLineDistancePercent,
+          maValue: evalSnapshot.maValue,
+          softLinePrice: evalSnapshot.softLinePrice,
+          softLineTriggered: evalSnapshot.softLineTriggered ? 1 : 0,
+          consecutiveTriggerDays: evalSnapshot.consecutiveTriggerDays,
+          nextAction: evalSnapshot.nextAction,
+          actionReason: evalSnapshot.actionReason,
+          dataSource: "rule_update",
+          createdAt: Date.now(),
+        });
+      }
+    } catch (err) {
+      console.warn("Failed to re-evaluate snapshot after PATCH:", err);
+    }
+
+    return NextResponse.json({ success: true, message: "持仓规则已更新并重新计算" });
   } catch (error: unknown) {
     console.error("Position detail PATCH error:", error);
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccount } from "@/lib/auth/session";
 import { ensureDbReady, schema } from "@/lib/db";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { fetchDailyCandles } from "@/lib/market/client";
 import { evaluatePositionRules } from "@/lib/rules/engine";
 import { Lot, Position as RulePosition } from "@/lib/rules/types";
@@ -54,6 +54,15 @@ export async function POST(
     if (addLotsCount >= 2) {
       return NextResponse.json({ success: false, error: "已达到最多加仓 2 次限制，拒绝加仓" }, { status: 400 });
     }
+
+    // 获取最新快照硬线，防止加仓摊高成本后硬线倒退 (Bug 4 修复)
+    const lastSnapList = await db
+      .select()
+      .from(schema.snapshots)
+      .where(eq(schema.snapshots.positionId, id))
+      .orderBy(desc(schema.snapshots.createdAt))
+      .limit(1);
+    const yesterdayHardLine = lastSnapList.length > 0 ? lastSnapList[0].hardLinePrice : pos.initialStopPrice;
 
     const addIndex = addLotsCount + 1;
     const riskPercent = addIndex === 1 ? 0.5 : 0.25;
@@ -123,6 +132,7 @@ export async function POST(
         const evalSnapshot = evaluatePositionRules({
           position: rulePos,
           candles,
+          yesterdayHardLine,
           config: session.account.ruleConfig,
         });
 

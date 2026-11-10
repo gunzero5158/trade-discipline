@@ -29,7 +29,7 @@ export default function CloseModal({
   onSuccess,
 }: CloseModalProps) {
   // 默认平仓股数：如果是落袋三分之一建议，默认填 1/3，否则全平
-  const isTrimAction = suggestedAction?.includes("1/3");
+  const isTrimAction = suggestedAction === "TRIM_ONE_THIRD" || suggestedAction?.includes("1/3");
   const defaultShares = isTrimAction
     ? Math.max(100, Math.floor((totalShares / 3) / 100) * 100 || Math.floor(totalShares / 3))
     : totalShares;

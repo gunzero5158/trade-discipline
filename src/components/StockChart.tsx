@@ -125,12 +125,28 @@ export default function StockChart({
     if (hardLinePrice && hardLinePrice > 0) {
       candleSeries.createPriceLine({
         price: hardLinePrice,
-        color: "#f43f5e", // 亮红实线/虚线
+        color: "#f43f5e", // 亮红实线
         lineWidth: 2,
         lineStyle: LineStyle.Solid,
         axisLabelVisible: true,
         title: `明日硬线 ${hardLinePrice.toFixed(2)}`,
       });
+    }
+
+    // 6. 持仓批次买入成本线标记
+    if (lots && lots.length > 0) {
+      for (const lot of lots) {
+        if (lot.price > 0) {
+          candleSeries.createPriceLine({
+            price: lot.price,
+            color: lot.type === "initial" ? "#10b981" : "#a855f7",
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: `${lot.type === "initial" ? "首仓买点" : "加仓买点"} ${lot.price.toFixed(2)}`,
+          });
+        }
+      }
     }
 
     chart.timeScale().fitContent();

@@ -430,6 +430,38 @@ describe("交易纪律规则引擎测试集", () => {
       expect(day2Confirmed.action).toBe("SELL_ALL_SOFT_LINE");
       expect(day2Confirmed.badgeVariant).toBe("danger");
     });
+
+    it("默认 20 日均线在阶段 2 自动切 10 日线，但用户自定义周期 (如 60 日线) 在阶段 2 保持 60 日不变", () => {
+      const candles = Array.from({ length: 70 }, (_, i) => {
+        const p = 20 + i * 0.1;
+        return {
+          date: `2026-08-${String((i % 28) + 1).padStart(2, "0")}`,
+          open: p,
+          high: p + 0.2,
+          low: p - 0.2,
+          close: p,
+          volume: 10000,
+        };
+      });
+
+      const defaultMaRes = calculateSoftLine({
+        candles,
+        maType: "EMA",
+        maPeriod: 20,
+        confirmDays: 1,
+        stage: 2,
+      });
+      expect(defaultMaRes.effectiveMaPeriod).toBe(10);
+
+      const customMaRes = calculateSoftLine({
+        candles,
+        maType: "EMA",
+        maPeriod: 60,
+        confirmDays: 1,
+        stage: 2,
+      });
+      expect(customMaRes.effectiveMaPeriod).toBe(60);
+    });
   });
 
   describe("6. 规则引擎端到端集成 (evaluatePositionRules)", () => {

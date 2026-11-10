@@ -141,6 +141,17 @@ export async function POST(
       .set(positionUpdates)
       .where(eq(schema.positions.id, id));
 
+    // 如果是部分平仓 (如阶段 3 卖出 1/3 落袋)，同步更新最新快照的明日动作，避免看板继续提示卖出 1/3
+    if (!closeResult.isFullClose && latestSnapshot.length > 0 && latestSnapshot[0].nextAction === "TRIM_ONE_THIRD") {
+      await db
+        .update(schema.snapshots)
+        .set({
+          nextAction: "HOLD",
+          actionReason: "已完成阶段 3 的 1/3 仓位落袋，剩余仓位继续按硬线与软线跟踪。",
+        })
+        .where(eq(schema.snapshots.id, latestSnapshot[0].id));
+    }
+
     return NextResponse.json({
       success: true,
       data: {
