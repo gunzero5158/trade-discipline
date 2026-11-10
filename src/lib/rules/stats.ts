@@ -1,0 +1,180 @@
+import { TradeRecord } from "./types";
+
+export interface MonthlyStatsResult {
+  totalTrades: number;
+  winTrades: number;
+  lossTrades: number;
+  breakevenTrades: number;
+  winRate: number;              // 胜率 (例如 0.55 即 55%)
+  totalPnLAmount: number;       // 总盈亏金额
+  totalR: number;               // 累计盈亏 R 倍数
+  avgWinR: number;              // 平均赢单 R 数
+  avgLossR: number;             // 平均输单 R 数 (取正数绝对值便于展示，如 1.05R)
+  expectancyR: number;          // 每笔期望 R = 胜率 × 赢单R - 输率 × 输单R
+  maxConsecutiveLosses: number; // 最大连续亏损次数
+  maxConsecutiveWins: number;   // 最大连续盈利次数
+  triggerCounts: {
+    hardLine: number;
+    softLine: number;
+    stage3Trim: number;
+    manual: number;
+  };
+  diagnostics: Array<{
+    type: "error" | "warning" | "info" | "success";
+    title: string;
+    message: string;
+  }>;
+}
+
+/**
+ * 严格按照《交易纪律.md》第八节与《开发文档.md》3.10 节实现月度交易复盘统计与诊断。
+ */
+export function calculateTradeStatistics(trades: TradeRecord[], totalCapital: number = 100000): MonthlyStatsResult {
+  if (trades.length === 0) {
+    return {
+      totalTrades: 0,
+      winTrades: 0,
+      lossTrades: 0,
+      breakevenTrades: 0,
+      winRate: 0,
+      totalPnLAmount: 0,
+      totalR: 0,
+      avgWinR: 0,
+      avgLossR: 0,
+      expectancyR: 0,
+      maxConsecutiveLosses: 0,
+      maxConsecutiveWins: 0,
+      triggerCounts: { hardLine: 0, softLine: 0, stage3Trim: 0, manual: 0 },
+      diagnostics: [
+        {
+          type: "info",
+          title: "暂无交易记录",
+          message: "完成第一笔平仓后，将自动开始核算胜率、盈亏比与复盘诊断建议。",
+        },
+      ],
+    };
+  }
+
+  let winTrades = 0;
+  let lossTrades = 0;
+  let breakevenTrades = 0;
+  let totalPnLAmount = 0;
+  let totalWinR = 0;
+  let totalLossR = 0;
+  let totalR = 0;
+
+  let currentConsecutiveLoss = 0;
+  let maxConsecutiveLosses = 0;
+  let currentConsecutiveWin = 0;
+  let maxConsecutiveWins = 0;
+
+  const triggerCounts = {
+    hardLine: 0,
+    softLine: 0,
+    stage3Trim: 0,
+    manual: 0,
+  };
+
+  for (const trade of trades) {
+    totalPnLAmount += trade.pnlAmount;
+    totalR += trade.rMultiple;
+
+    if (trade.rMultiple > 0.05) {
+      winTrades++;
+      totalWinR += trade.rMultiple;
+      currentConsecutiveWin++;
+      currentConsecutiveLoss = 0;
+      if (currentConsecutiveWin > maxConsecutiveWins) {
+        maxConsecutiveWins = currentConsecutiveWin;
+      }
+    } else if (trade.rMultiple < -0.05) {
+      lossTrades++;
+      totalLossR += Math.abs(trade.rMultiple);
+      currentConsecutiveLoss++;
+      currentConsecutiveWin = 0;
+      if (currentConsecutiveLoss > maxConsecutiveLosses) {
+        maxConsecutiveLosses = currentConsecutiveLoss;
+      }
+    } else {
+      breakevenTrades++;
+      currentConsecutiveLoss = 0;
+      currentConsecutiveWin = 0;
+    }
+
+    if (trade.triggerReason === "hard-line") triggerCounts.hardLine++;
+    else if (trade.triggerReason === "soft-line") triggerCounts.softLine++;
+    else if (trade.triggerReason === "stage3-trim") triggerCounts.stage3Trim++;
+    else triggerCounts.manual++;
+  }
+
+  const totalTrades = trades.length;
+  const winRate = winTrades / totalTrades;
+  const lossRate = lossTrades / totalTrades;
+  const avgWinR = winTrades > 0 ? Number((totalWinR / winTrades).toFixed(2)) : 0;
+  const avgLossR = lossTrades > 0 ? Number((totalLossR / lossTrades).toFixed(2)) : 0;
+  const expectancyR = Number(((winRate * avgWinR) - (lossRate * avgLossR)).toFixed(3));
+
+  // 三大核心检查点与月度止损闸
+  const diagnostics: MonthlyStatsResult["diagnostics"] = [];
+
+  // 检查点 1：输单平均超过 1R -> 止损执行不严
+  if (lossTrades >= 3 && avgLossR > 1.05) {
+    diagnostics.push({
+      type: "error",
+      title: "止损执行不严 (输单平均超过 1R)",
+      message: `平均每笔输单亏损为 ${avgLossR.toFixed(2)}R，超过了设定的 1R 刚性红线！请检查是否存在盘中已达硬线却犹豫观望、甚至向下挪动止损的不纪律行为。`,
+    });
+  }
+
+  // 检查点 2：赢单平均不到 2R -> 止盈偏早
+  if (winTrades >= 3 && avgWinR < 2.0) {
+    diagnostics.push({
+      type: "warning",
+      title: "止盈偏早 (赢单平均不到 2R)",
+      message: `平均每笔赢单仅获得 +${avgWinR.toFixed(2)}R 收益，未达 2.5R 目标。请检查软线均线是否设置得过于紧贴，或存在主观频繁早跑的情况。`,
+    });
+  }
+
+  // 检查点 3：胜率低于 40% -> 检查买点
+  if (totalTrades >= 5 && winRate < 0.40) {
+    diagnostics.push({
+      type: "warning",
+      title: "买点胜率偏低 (检查买入逻辑)",
+      message: `当前胜率仅为 ${(winRate * 100).toFixed(1)}% (低于 40%)。请重点检查追涨买入的个股是否已偏离均线过远，或建仓时突破平台的放量有效性不足。`,
+    });
+  }
+
+  // 月度止损闸：当月亏损达到总资金 6%
+  if (totalPnLAmount <= -totalCapital * 0.06) {
+    diagnostics.push({
+      type: "error",
+      title: "月度风控红线已触发 (-6%)",
+      message: `当月累计亏损金额已达 ${Math.abs(totalPnLAmount).toFixed(0)} 元 (超过总资金 6%)！按铁律必须停手至下月初，次月单笔风险额度减半至 0.5% 重新开始，连续盈利一个月后方可恢复 1%。`,
+    });
+  }
+
+  if (diagnostics.length === 0) {
+    diagnostics.push({
+      type: "success",
+      title: "纪律执行良好",
+      message: `胜率 ${(winRate * 100).toFixed(1)}%，平均盈亏比 ${avgLossR > 0 ? (avgWinR / avgLossR).toFixed(2) : "优秀"}，单笔数学期望为 +${expectancyR}R。继续保持知行合一！`,
+    });
+  }
+
+  return {
+    totalTrades,
+    winTrades,
+    lossTrades,
+    breakevenTrades,
+    winRate: Number(winRate.toFixed(4)),
+    totalPnLAmount: Number(totalPnLAmount.toFixed(2)),
+    totalR: Number(totalR.toFixed(2)),
+    avgWinR,
+    avgLossR,
+    expectancyR,
+    maxConsecutiveLosses,
+    maxConsecutiveWins,
+    triggerCounts,
+    diagnostics,
+  };
+}
