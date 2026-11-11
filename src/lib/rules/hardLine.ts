@@ -2,8 +2,8 @@ import { Lot, RuleConfig, DEFAULT_RULE_CONFIG } from "./types";
 
 export interface HardLineCalculationInput {
   stage: number;
-  costPrice: number;
-  maxGainRatio: number;
+  costPrice: number;           // 首仓成本 (阶段硬线的基准，不是加权平均成本)
+  maxGainRatio: number;        // 相对首仓成本的最高浮盈
   initialStopPrice: number;
   lots?: Lot[];
   yesterdayHardLine?: number | null;
@@ -23,7 +23,7 @@ export interface HardLineResult {
 /**
  * 严格按照《交易纪律.md》第 3.3、3.4 节与《方案补充与讨论疑问.md》Bug 4 修正公式计算硬线。
  *
- * 阶段硬线公式：
+ * 阶段硬线公式（成本指首仓成本；若按加权平均成本算，加仓抬高成本会把硬线顶到加仓价附近）：
  * - 阶段 0 (<5%): 初始止损位
  * - 阶段 1 (≥5%): 成本 × (1 + 2%)
  * - 阶段 2 (≥10%): 成本 × (1 + 最高浮盈 × 50%)
@@ -57,13 +57,11 @@ export function calculateHardLine(input: HardLineCalculationInput): HardLineResu
       stageHardLine = initialStopPrice;
   }
 
-  // 检查加仓笔止损位
+  // 检查加仓笔止损位 (只看 type=add 的笔，不依赖数组顺序)
   let latestAddStopPrice = 0;
-  if (input.lots && input.lots.length > 1) {
-    for (let i = 1; i < input.lots.length; i++) {
-      if (input.lots[i].stopPrice > latestAddStopPrice) {
-        latestAddStopPrice = input.lots[i].stopPrice;
-      }
+  for (const lot of input.lots ?? []) {
+    if (lot.type === "add" && lot.stopPrice > latestAddStopPrice) {
+      latestAddStopPrice = lot.stopPrice;
     }
   }
 

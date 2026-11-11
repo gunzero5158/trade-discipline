@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureDbReady, schema } from "@/lib/db";
-import { eq, desc } from "drizzle-orm";
-import { fetchDailyCandles } from "@/lib/market/client";
-import { evaluatePositionRules } from "@/lib/rules/engine";
-import { Lot, Position as RulePosition } from "@/lib/rules/types";
+import { eq } from "drizzle-orm";
+import { evaluateAndSnapshot } from "@/lib/server/positionSnapshot";
+import { DEFAULT_RULE_CONFIG, RuleConfig } from "@/lib/rules/types";
 
 export async function GET(req: NextRequest) {
   return handleCronSnapshot(req);
@@ -13,19 +12,19 @@ export async function POST(req: NextRequest) {
   return handleCronSnapshot(req);
 }
 
+/**
+ * 每日收盘后的快照任务。Vercel Cron 会带 `Authorization: Bearer <CRON_SECRET>` 调用 (见 vercel.json)。
+ * 密钥只接受请求头，不接受网址参数，避免进访问日志。
+ */
 async function handleCronSnapshot(req: NextRequest) {
-  // 校验 CRON_SECRET 防止外人未经授权触发
   const expectedSecret = process.env.CRON_SECRET;
-  if (expectedSecret) {
-    const authHeader = req.headers.get("authorization");
-    const cronHeader = req.headers.get("x-cron-secret");
-    const { searchParams } = new URL(req.url);
-    const querySecret = searchParams.get("secret");
-    const token = authHeader?.replace(/^Bearer\s+/i, "") || cronHeader || querySecret;
-
-    if (token !== expectedSecret) {
-      return NextResponse.json({ success: false, error: "未授权 Cron 任务" }, { status: 401 });
-    }
+  if (!expectedSecret) {
+    return NextResponse.json({ success: false, error: "服务端未配置 CRON_SECRET，拒绝执行" }, { status: 500 });
+  }
+  const authHeader = req.headers.get("authorization");
+  const token = authHeader?.replace(/^Bearer\s+/i, "") || req.headers.get("x-cron-secret");
+  if (token !== expectedSecret) {
+    return NextResponse.json({ success: false, error: "未授权 Cron 任务" }, { status: 401 });
   }
 
   const db = await ensureDbReady();
@@ -38,116 +37,31 @@ async function handleCronSnapshot(req: NextRequest) {
       .where(eq(schema.positions.status, "open"));
 
     const allAccounts = await db.select().from(schema.accounts);
-    const accountConfigMap = new Map<string, any>();
+    const accountConfigMap = new Map<string, RuleConfig>();
     for (const acc of allAccounts) {
       if (acc.ruleConfigJson) {
         try {
-          accountConfigMap.set(acc.id, JSON.parse(acc.ruleConfigJson));
+          accountConfigMap.set(acc.id, { ...DEFAULT_RULE_CONFIG, ...JSON.parse(acc.ruleConfigJson) });
         } catch {
-          // ignore
+          // 配置损坏则用默认值
         }
       }
     }
 
     let successful = 0;
+    let skippedIntraday = 0;
     let failed = 0;
     const errors: Array<{ symbol: string; error: string }> = [];
 
     for (const pos of openPositions) {
       try {
-        const lots = await db
-          .select()
-          .from(schema.lots)
-          .where(eq(schema.lots.positionId, pos.id));
-
-        const lotsForPos: Lot[] = lots.map((l) => ({
-          id: l.id,
-          positionId: l.positionId,
-          type: l.type as any,
-          date: l.date,
-          price: l.price,
-          shares: l.shares,
-          stopPrice: l.stopPrice,
-          riskPercent: l.riskPercent,
-        }));
-
-        // 获取昨日快照
-        const lastSnap = await db
-          .select()
-          .from(schema.snapshots)
-          .where(eq(schema.snapshots.positionId, pos.id))
-          .orderBy(desc(schema.snapshots.createdAt))
-          .limit(1);
-
-        const candles = await fetchDailyCandles(pos.symbol, 120);
-        if (candles.length === 0) {
-          throw new Error("No candles returned");
-        }
-
-        const rulePos: RulePosition = {
-          id: pos.id,
-          accountId: pos.accountId,
-          symbol: pos.symbol,
-          name: pos.name,
-          market: pos.market as any,
-          status: "open",
-          initialStopPrice: pos.initialStopPrice,
-          maType: pos.maType as any,
-          maPeriod: pos.maPeriod,
-          confirmDays: pos.confirmDays,
-          manualStopPrice: pos.manualStopPrice,
-          maxStage: pos.maxStage,
-          stage3Trimmed: !!pos.stage3Trimmed,
-          targetPrice: pos.targetPrice,
-          accelerationLocked: !!pos.accelerationLocked,
-          lots: lotsForPos,
-          createdAt: new Date(pos.createdAt).toISOString(),
-          updatedAt: new Date(pos.updatedAt).toISOString(),
-        };
-
-        const snapshot = evaluatePositionRules({
-          position: rulePos,
-          candles,
-          yesterdayHardLine: lastSnap.length > 0 ? lastSnap[0].hardLinePrice : pos.initialStopPrice,
+        const lotRows = await db.select().from(schema.lots).where(eq(schema.lots.positionId, pos.id));
+        const result = await evaluateAndSnapshot(db, pos, lotRows, {
+          dataSource: "cron",
           config: accountConfigMap.get(pos.accountId),
         });
-
-        // 写入新快照
-        const snapId = `snap_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        await db.insert(schema.snapshots).values({
-          id: snapId,
-          positionId: pos.id,
-          date: snapshot.date,
-          closePrice: snapshot.closePrice,
-          highPrice: snapshot.highPrice,
-          costPrice: snapshot.costPrice,
-          maxGainRatio: snapshot.maxGainRatio,
-          stage: snapshot.stage,
-          hardLinePrice: snapshot.hardLinePrice,
-          hardLineDistancePercent: snapshot.hardLineDistancePercent,
-          maValue: snapshot.maValue,
-          softLinePrice: snapshot.softLinePrice,
-          softLineTriggered: snapshot.softLineTriggered ? 1 : 0,
-          consecutiveTriggerDays: snapshot.consecutiveTriggerDays,
-          nextAction: snapshot.nextAction,
-          actionReason: snapshot.actionReason,
-          dataSource: "cron",
-          createdAt: Date.now(),
-        });
-
-        // 状态更新
-        if (snapshot.stage > pos.maxStage || snapshot.accelerationMode !== !!pos.accelerationLocked) {
-          await db
-            .update(schema.positions)
-            .set({
-              maxStage: Math.max(pos.maxStage, snapshot.stage),
-              accelerationLocked: snapshot.accelerationMode ? 1 : 0,
-              updatedAt: Date.now(),
-            })
-            .where(eq(schema.positions.id, pos.id));
-        }
-
-        successful++;
+        if (result.persisted) successful++;
+        else skippedIntraday++;
       } catch (err: unknown) {
         failed++;
         errors.push({ symbol: pos.symbol, error: String(err) });
@@ -159,6 +73,7 @@ async function handleCronSnapshot(req: NextRequest) {
       success: true,
       processed: openPositions.length,
       successful,
+      skippedIntraday,
       failed,
       errors,
       durationMs: Date.now() - startedAt,

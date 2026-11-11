@@ -214,9 +214,12 @@ describe("系统数据库与端到端核心业务集成测试", () => {
       100000
     );
 
-    expect(stats.totalTrades).toBe(2);
-    expect(stats.winTrades).toBe(2);
+    // 2026-11 修订：减仓 1/3 与最终平仓合并为一笔完整交易 (方案补充 Bug 3)
+    expect(stats.totalTrades).toBe(1);
+    expect(stats.winTrades).toBe(1);
     expect(stats.winRate).toBe(1.0);
+    expect(stats.avgWinR).toBeCloseTo(3.54, 1);
+    expect(stats.triggerCounts.stage3Trim).toBe(1);
     expect(stats.totalPnLAmount).toBe(3400);
     expect(stats.totalR).toBeCloseTo(3.54, 1);
   });

@@ -1,13 +1,15 @@
 import { TradeRecord } from "./types";
 
 export interface MonthlyStatsResult {
-  totalTrades: number;
+  totalTrades: number;          // 完整交易笔数 (一只股票从开仓到全部平仓算一笔，中途减仓合并进去)
   winTrades: number;
   lossTrades: number;
   breakevenTrades: number;
   winRate: number;              // 胜率 (例如 0.55 即 55%)
-  totalPnLAmount: number;       // 总盈亏金额
+  totalPnLAmount: number;       // 全部记录的盈亏金额合计 (含尚未全部平仓的减仓落袋)
   totalR: number;               // 累计盈亏 R 倍数
+  month?: string;               // 月度红线所看的月份 (YYYY-MM)
+  monthPnLAmount: number;       // 该月已实现盈亏
   avgWinR: number;              // 平均赢单 R 数
   avgLossR: number;             // 平均输单 R 数 (取正数绝对值便于展示，如 1.05R)
   expectancyR: number;          // 每笔期望 R = 胜率 × 赢单R - 输率 × 输单R
@@ -26,10 +28,50 @@ export interface MonthlyStatsResult {
   }>;
 }
 
+export interface TradeStatisticsOptions {
+  month?: string; // YYYY-MM，月度 6% 红线按这个月算；不传则按全部记录算
+}
+
+/**
+ * 一笔完整交易 = 同一持仓的全部平仓记录合并：以全部平仓那条 (hard-line / soft-line / manual) 为准，
+ * 它之前同一持仓的减仓 (stage3-trim) 盈亏与 R 并进去。只有减仓、尚未全部平仓的持仓不计入笔数。
+ * 对应《方案补充》Bug 3：R 倍数分母始终是首仓 1R，所以各记录的 rMultiple 可以直接相加。
+ */
+interface CompletedTrade {
+  positionId: string;
+  rMultiple: number;
+  pnlAmount: number;
+  triggerReason: TradeRecord["triggerReason"];
+  exitDate: string;
+}
+
+function groupCompletedTrades(trades: TradeRecord[]): CompletedTrade[] {
+  const sorted = [...trades].sort((a, b) => a.exitDate.localeCompare(b.exitDate) || a.createdAt.localeCompare(b.createdAt));
+  const pending = new Map<string, { r: number; pnl: number }>();
+  const completed: CompletedTrade[] = [];
+  for (const t of sorted) {
+    const acc = pending.get(t.positionId) ?? { r: 0, pnl: 0 };
+    acc.r += t.rMultiple;
+    acc.pnl += t.pnlAmount;
+    if (t.triggerReason === "stage3-trim") {
+      pending.set(t.positionId, acc);
+      continue;
+    }
+    completed.push({ positionId: t.positionId, rMultiple: acc.r, pnlAmount: acc.pnl, triggerReason: t.triggerReason, exitDate: t.exitDate });
+    pending.delete(t.positionId);
+  }
+  return completed;
+}
+
 /**
  * 严格按照《交易纪律.md》第八节与《开发文档.md》3.10 节实现月度交易复盘统计与诊断。
  */
-export function calculateTradeStatistics(trades: TradeRecord[], totalCapital: number = 100000): MonthlyStatsResult {
+export function calculateTradeStatistics(
+  trades: TradeRecord[],
+  totalCapital: number = 100000,
+  options: TradeStatisticsOptions = {}
+): MonthlyStatsResult {
+  const month = options.month;
   if (trades.length === 0) {
     return {
       totalTrades: 0,
@@ -39,6 +81,8 @@ export function calculateTradeStatistics(trades: TradeRecord[], totalCapital: nu
       winRate: 0,
       totalPnLAmount: 0,
       totalR: 0,
+      month,
+      monthPnLAmount: 0,
       avgWinR: 0,
       avgLossR: 0,
       expectancyR: 0,
@@ -75,10 +119,21 @@ export function calculateTradeStatistics(trades: TradeRecord[], totalCapital: nu
     manual: 0,
   };
 
-  for (const trade of trades) {
-    totalPnLAmount += trade.pnlAmount;
-    totalR += trade.rMultiple;
+  // 金额与触发原因按每条记录如实累计
+  let monthPnLAmount = 0;
+  for (const t of trades) {
+    totalPnLAmount += t.pnlAmount;
+    totalR += t.rMultiple;
+    if (!month || t.exitDate.startsWith(month)) monthPnLAmount += t.pnlAmount;
+    if (t.triggerReason === "hard-line") triggerCounts.hardLine++;
+    else if (t.triggerReason === "soft-line") triggerCounts.softLine++;
+    else if (t.triggerReason === "stage3-trim") triggerCounts.stage3Trim++;
+    else triggerCounts.manual++;
+  }
 
+  // 胜率、盈亏比按"完整交易"算
+  const completedTrades = groupCompletedTrades(trades);
+  for (const trade of completedTrades) {
     if (trade.rMultiple > 0.05) {
       winTrades++;
       totalWinR += trade.rMultiple;
@@ -100,16 +155,11 @@ export function calculateTradeStatistics(trades: TradeRecord[], totalCapital: nu
       currentConsecutiveLoss = 0;
       currentConsecutiveWin = 0;
     }
-
-    if (trade.triggerReason === "hard-line") triggerCounts.hardLine++;
-    else if (trade.triggerReason === "soft-line") triggerCounts.softLine++;
-    else if (trade.triggerReason === "stage3-trim") triggerCounts.stage3Trim++;
-    else triggerCounts.manual++;
   }
 
-  const totalTrades = trades.length;
-  const winRate = winTrades / totalTrades;
-  const lossRate = lossTrades / totalTrades;
+  const totalTrades = completedTrades.length;
+  const winRate = totalTrades > 0 ? winTrades / totalTrades : 0;
+  const lossRate = totalTrades > 0 ? lossTrades / totalTrades : 0;
   const avgWinR = winTrades > 0 ? Number((totalWinR / winTrades).toFixed(2)) : 0;
   const avgLossR = lossTrades > 0 ? Number((totalLossR / lossTrades).toFixed(2)) : 0;
   const expectancyR = Number(((winRate * avgWinR) - (lossRate * avgLossR)).toFixed(3));
@@ -145,15 +195,21 @@ export function calculateTradeStatistics(trades: TradeRecord[], totalCapital: nu
   }
 
   // 月度止损闸：当月亏损达到总资金 6%
-  if (totalPnLAmount <= -totalCapital * 0.06) {
+  if (monthPnLAmount <= -totalCapital * 0.06) {
     diagnostics.push({
       type: "error",
       title: "月度风控红线已触发 (-6%)",
-      message: `当月累计亏损金额已达 ${Math.abs(totalPnLAmount).toFixed(0)} 元 (超过总资金 6%)！按铁律必须停手至下月初，次月单笔风险额度减半至 0.5% 重新开始，连续盈利一个月后方可恢复 1%。`,
+      message: `${month ? month + " " : ""}当月累计亏损金额已达 ${Math.abs(monthPnLAmount).toFixed(0)} 元 (超过总资金 6%)！按铁律必须停手至下月初，次月单笔风险额度减半至 0.5% 重新开始，连续盈利一个月后方可恢复 1%。`,
     });
   }
 
-  if (diagnostics.length === 0) {
+  if (diagnostics.length === 0 && totalTrades === 0) {
+    diagnostics.push({
+      type: "info",
+      title: "尚无完整交易",
+      message: "已有减仓落袋记录，但还没有一笔从开仓到全部平仓的完整交易，胜率与盈亏比暂不统计。",
+    });
+  } else if (diagnostics.length === 0) {
     diagnostics.push({
       type: "success",
       title: "纪律执行良好",
@@ -169,6 +225,8 @@ export function calculateTradeStatistics(trades: TradeRecord[], totalCapital: nu
     winRate: Number(winRate.toFixed(4)),
     totalPnLAmount: Number(totalPnLAmount.toFixed(2)),
     totalR: Number(totalR.toFixed(2)),
+    month,
+    monthPnLAmount: Number(monthPnLAmount.toFixed(2)),
     avgWinR,
     avgLossR,
     expectancyR,

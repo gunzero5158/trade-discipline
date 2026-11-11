@@ -1,4 +1,5 @@
 import { Lot, RuleConfig, DEFAULT_RULE_CONFIG } from "./types";
+import { getInitialLot } from "./lots";
 
 export interface StageCalculationInput {
   lots: Lot[];
@@ -9,11 +10,12 @@ export interface StageCalculationInput {
 }
 
 export interface StageCalculationResult {
-  costPrice: number;          // 加权平均成本
+  costPrice: number;          // 加权平均成本 (实际盈亏按它算)
+  initialCostPrice: number;   // 首仓成本 (阶段与阶段硬线按它算)
   totalShares: number;        // 总股数
   totalCost: number;          // 总成本金额
   highPrice: number;          // 持仓以来最高价
-  maxGainRatio: number;       // 持仓以来最高浮盈 ((highPrice / costPrice) - 1)
+  maxGainRatio: number;       // 持仓以来最高浮盈 ((highPrice / initialCostPrice) - 1)
   currentGainRatio: number;   // 当前收盘浮盈 ((currentClosePrice / costPrice) - 1)
   calculatedStage: number;    // 根据当前浮盈算出的阶段
   effectiveStage: number;     // 经过 maxStage 保护后的最终生效阶段 (绝不降级)
@@ -31,10 +33,11 @@ export const STAGE_NAMES = [
  * 严格按照《交易纪律.md》与《方案补充与讨论疑问.md》计算持仓浮盈与阶段。
  *
  * 核心机制与 Bug 修复：
- * - 加权成本 = sum(price * shares) / sum(shares)
- * - 最高浮盈 = highPrice / costPrice - 1
- * - Bug 1 修复：加仓摊高平均成本会导致最高浮盈缩水，但阶段强制执行
- *   effectiveStage = max(previousMaxStage, calculatedStage)，绝不倒退。
+ * - 加权成本 = sum(price * shares) / sum(shares)，只用于算实际盈亏。
+ * - 阶段与阶段硬线按首仓成本算：最高浮盈 = highPrice / initialCostPrice - 1。
+ *   《交易纪律》第六节"算的时候分开算，管的时候合起来管"：加仓不改变老仓的浮盈节奏，
+ *   加仓笔的止损位另行与硬线取大（见 hardLine.ts）。
+ * - Bug 1 修复：阶段仍强制执行 effectiveStage = max(previousMaxStage, calculatedStage)，绝不倒退。
  */
 export function calculateStage(input: StageCalculationInput): StageCalculationResult {
   const config = input.config ?? DEFAULT_RULE_CONFIG;
@@ -57,8 +60,10 @@ export function calculateStage(input: StageCalculationInput): StageCalculationRe
   }
 
   const costPrice = totalCost / totalShares;
-  const highPrice = Math.max(input.highPriceSinceEntry, costPrice, input.currentClosePrice);
-  const maxGainRatio = Number(((highPrice / costPrice) - 1).toFixed(6));
+  const initialLot = getInitialLot(lots)!;
+  const initialCostPrice = initialLot.price;
+  const highPrice = Math.max(input.highPriceSinceEntry, initialCostPrice, input.currentClosePrice);
+  const maxGainRatio = Number(((highPrice / initialCostPrice) - 1).toFixed(6));
   const currentGainRatio = Number(((input.currentClosePrice / costPrice) - 1).toFixed(6));
 
   // 基础阶段计算 (使用高精度四舍五入后的浮点数避免 0.19999999999999996 导致的精度陷阱)
@@ -79,6 +84,7 @@ export function calculateStage(input: StageCalculationInput): StageCalculationRe
 
   return {
     costPrice: Number(costPrice.toFixed(4)),
+    initialCostPrice,
     totalShares,
     totalCost: Number(totalCost.toFixed(2)),
     highPrice: Number(highPrice.toFixed(4)),

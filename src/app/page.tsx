@@ -63,6 +63,7 @@ interface PositionItem {
     nextAction: string;
     actionReason: string;
   } | null;
+  intraday: { price: number; hardLineHit: boolean } | null;
   isStale: boolean;
 }
 
@@ -394,6 +395,16 @@ export default function DashboardPage() {
                               上次快照
                             </span>
                           )}
+                          {item.intraday && !item.intraday.hardLineHit && (
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-sky-950/80 text-sky-300 border border-sky-800">
+                              盘中 ¥{item.intraday.price.toFixed(2)}，规则按上一收盘算
+                            </span>
+                          )}
+                          {item.intraday?.hardLineHit && (
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-red-950/80 text-red-300 border border-red-800 font-bold">
+                              盘中 ¥{item.intraday.price.toFixed(2)} 已低于硬线，立即执行
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -401,7 +412,7 @@ export default function DashboardPage() {
                     {/* 中间：行情与盈亏三位一体并列展示 */}
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs flex-1">
                       <div>
-                        <span className="text-gray-500 block">最新收盘 / 成本</span>
+                        <span className="text-gray-500 block">{item.intraday ? "盘中价 / 成本" : "最新收盘 / 成本"}</span>
                         <div className="font-mono mt-0.5 font-bold text-white">
                           ¥{item.currentPrice.toFixed(2)}
                           <span className="text-gray-400 text-[11px] font-normal block">

@@ -33,6 +33,8 @@ export interface OpenPositionResult {
   // 校验三：追涨/止损过远
   isRiskRewardPoor: boolean;
   riskRewardMessage?: string;
+  // 风险额度连一个交易单位都买不起
+  insufficientRiskBudgetMessage?: string;
 }
 
 export interface AddPositionInput {
@@ -121,9 +123,14 @@ export function calculateOpenPosition(input: OpenPositionInput): OpenPositionRes
   const stopDistancePercent = Math.abs(stopLossPercent);
   const targetRiskAmount = Number((input.totalCapital * (riskPercent / 100)).toFixed(2));
 
-  // 股数 = 总资金 × 风险比例 ÷ 每股亏损空间，向下取整到交易单位 (加 1e-9 避免 624.9999999999994 精度向下误切)
+  // 股数 = 总资金 × 风险比例 ÷ 每股亏损空间，向下取整到交易单位 (加 1e-7 避免 624.9999999999994 精度向下误切)
+  // 不够一个交易单位就是 0 股：硬凑一手会悄悄超过单笔风险上限
   const rawShares = (targetRiskAmount / perShareRisk) + 1e-7;
-  const shares = Math.max(step, Math.floor(rawShares / step) * step);
+  const shares = Math.floor(rawShares / step) * step;
+  let insufficientRiskBudgetMessage: string | undefined;
+  if (shares <= 0) {
+    insufficientRiskBudgetMessage = `按 ${riskPercent}% 风险额度 (${targetRiskAmount} 元) 和每股 ${perShareRisk.toFixed(2)} 元的止损空间，买不起一个交易单位 (${step} 股)。要么放近止损，要么放弃。`;
+  }
   const positionAmount = Number((shares * input.buyPrice).toFixed(2));
   const positionPercent = Number((positionAmount / input.totalCapital).toFixed(4));
   const effectiveRiskAmount = Number((shares * perShareRisk).toFixed(2));
@@ -176,6 +183,7 @@ export function calculateOpenPosition(input: OpenPositionInput): OpenPositionRes
     totalRiskExceededMessage,
     isRiskRewardPoor,
     riskRewardMessage,
+    insufficientRiskBudgetMessage,
   };
 }
 

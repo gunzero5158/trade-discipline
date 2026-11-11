@@ -13,6 +13,7 @@ import { executePositionClose } from "../closing";
 import { calculateTradeStatistics } from "../stats";
 import { evaluatePositionRules } from "../engine";
 import { Lot, Position } from "../types";
+import { applyClosedShares } from "../lots";
 
 describe("交易纪律规则引擎测试集", () => {
   describe("1. 仓位与开仓计算器 (对应《交易纪律.md》第二节)", () => {
@@ -306,8 +307,10 @@ describe("交易纪律规则引擎测试集", () => {
       });
 
       expect(stage.costPrice).toBe(20.8);
-      expect(stage.calculatedStage).toBe(1); // 纯按当前浮盈 8.17% 是阶段 1
-      expect(stage.effectiveStage).toBe(2);  // 经过 maxStage 保护后强制维持阶段 2，绝不倒退！
+      // 2026-11 修订：阶段按首仓成本算 (22.5 / 20 - 1 = 12.5%)，加仓摊高平均成本不再影响阶段
+      expect(stage.initialCostPrice).toBe(20);
+      expect(stage.calculatedStage).toBe(2);
+      expect(stage.effectiveStage).toBe(2);  // maxStage 保护仍然保留，作为第二道保险
     });
 
     it("Bug 2 验证：阶段 3 卖出 1/3 状态标记 (stage3Trimmed)", () => {
@@ -546,6 +549,103 @@ describe("交易纪律规则引擎测试集", () => {
       expect(statsB.avgWinR).toBe(2.6);
       expect(statsB.avgLossR).toBe(1.0);
       expect(statsB.expectancyR).toBeGreaterThan(0.5);
+    });
+  });
+
+  describe("8. 2026-11 审查修复回归", () => {
+    const mk = (closes: number[]) =>
+      closes.map((c, i) => ({
+        date: `2026-0${1 + Math.floor(i / 28)}-${String((i % 28) + 1).padStart(2, "0")}`,
+        open: c, high: c, low: c, close: c, volume: 1000,
+      }));
+
+    it("加仓后阶段硬线按首仓成本算：文档算例 (20 元首仓涨到 24，23 元加仓) 硬线应为 22.4 而不是被加仓抬高", () => {
+      const candles = mk([...Array(60).fill(20), 21, 22, 23, 24, 23.5, 23]);
+      const entryDate = candles[60].date;
+      const addDate = candles[65].date;
+      const base: Position = {
+        id: "p", accountId: "a", symbol: "600000", name: "x", market: "a-share", status: "open",
+        initialStopPrice: 18.4, maType: "EMA", maPeriod: 20, confirmDays: 1, maxStage: 0, stage3Trimmed: false,
+        lots: [{ id: "l1", positionId: "p", type: "initial", date: entryDate, price: 20, shares: 625, stopPrice: 18.4, riskPercent: 1 }],
+        createdAt: "", updatedAt: "",
+      };
+      const before = evaluatePositionRules({ position: base, candles, yesterdayHardLine: 18.4 });
+      expect(before.hardLinePrice).toBe(22.4);
+
+      const withAdd: Position = {
+        ...base, maxStage: 3,
+        lots: [...base.lots, { id: "l2", positionId: "p", type: "add", date: addDate, price: 23, shares: 400, stopPrice: 21.8, riskPercent: 0.5 }],
+      };
+      const after = evaluatePositionRules({ position: withAdd, candles, yesterdayHardLine: before.hardLinePrice });
+      expect(after.hardLinePrice).toBe(22.4);
+      expect(after.initialCostPrice).toBe(20);
+      expect(after.costPrice).toBeCloseTo(21.1707, 3);
+      expect(after.maxGainRatio).toBeCloseTo(0.2, 6);
+    });
+
+    it("加仓笔止损位只从 type=add 的笔里取，与数组顺序无关", () => {
+      const lots: Lot[] = [
+        { id: "l2", positionId: "p", type: "add", date: "2026-02-01", price: 23, shares: 400, stopPrice: 21.8, riskPercent: 0.5 },
+        { id: "l1", positionId: "p", type: "initial", date: "2026-01-01", price: 20, shares: 625, stopPrice: 18.4, riskPercent: 1 },
+      ];
+      const res = calculateHardLine({ stage: 0, costPrice: 20, maxGainRatio: 0, initialStopPrice: 18.4, lots });
+      expect(res.latestAddStopPrice).toBe(21.8);
+    });
+
+    it("统计：阶段 3 减仓 1/3 与最终平仓合并成一笔交易；月度 6% 红线只看当月", () => {
+      const trades = [
+        { id: "t1", positionId: "p1", symbol: "A", name: "A", exitDate: "2026-10-15", exitPrice: 26, shares: 300, triggerReason: "stage3-trim" as const, pnlAmount: 1440, pnlRatio: 0.22, rMultiple: 1.5, maxGainRatio: 0.22, givebackRatio: 0, createdAt: "" },
+        { id: "t2", positionId: "p1", symbol: "A", name: "A", exitDate: "2026-10-20", exitPrice: 24, shares: 700, triggerReason: "soft-line" as const, pnlAmount: 1960, pnlRatio: 0.13, rMultiple: 2.04, maxGainRatio: 0.22, givebackRatio: 0.09, createdAt: "" },
+        { id: "t3", positionId: "p2", symbol: "B", name: "B", exitDate: "2026-09-02", exitPrice: 18, shares: 100, triggerReason: "hard-line" as const, pnlAmount: -7000, pnlRatio: -0.1, rMultiple: -1, maxGainRatio: 0, givebackRatio: 0, createdAt: "" },
+        { id: "t4", positionId: "p3", symbol: "C", name: "C", exitDate: "2026-10-25", exitPrice: 30, shares: 100, triggerReason: "stage3-trim" as const, pnlAmount: 500, pnlRatio: 0.2, rMultiple: 0.5, maxGainRatio: 0.2, givebackRatio: 0, createdAt: "" },
+      ];
+      const stats = calculateTradeStatistics(trades, 100000, { month: "2026-10" });
+      // p1 合并为一笔 (+3.54R)，p2 一笔 (-1R)，p3 只减仓未平仓不计入笔数
+      expect(stats.totalTrades).toBe(2);
+      expect(stats.winTrades).toBe(1);
+      expect(stats.lossTrades).toBe(1);
+      expect(stats.avgWinR).toBeCloseTo(3.54, 2);
+      expect(stats.triggerCounts.softLine).toBe(1);
+      expect(stats.triggerCounts.stage3Trim).toBe(2);
+      // 当月 (10 月) 盈亏 = 1440 + 1960 + 500 = +3900，9 月的 -7000 不触发月度红线
+      expect(stats.monthPnLAmount).toBe(3900);
+      expect(stats.diagnostics.find((d) => d.title.includes("月度风控红线"))).toBeUndefined();
+      // 全部历史盈亏仍如实累计
+      expect(stats.totalPnLAmount).toBe(-3100);
+    });
+
+    it("开仓计算器：风险额度不够买一手时返回 0 股并给出提示，而不是硬凑一手", () => {
+      const res = calculateOpenPosition({ totalCapital: 10000, buyPrice: 100, stopPrice: 90 });
+      expect(res.shares).toBe(0);
+      expect(res.positionAmount).toBe(0);
+      expect(res.insufficientRiskBudgetMessage).toBeDefined();
+    });
+
+    it("已平仓股数按先买先卖从各笔里扣减", () => {
+      const lots: Lot[] = [
+        { id: "l1", positionId: "p", type: "initial", date: "2026-01-01", price: 20, shares: 600, stopPrice: 18.4, riskPercent: 1 },
+        { id: "l2", positionId: "p", type: "add", date: "2026-02-01", price: 23, shares: 400, stopPrice: 21.8, riskPercent: 0.5 },
+      ];
+      const remaining = applyClosedShares(lots, 700);
+      expect(remaining.map((l) => l.shares)).toEqual([0, 300]);
+      expect(applyClosedShares(lots, 0)).toEqual(lots);
+    });
+
+    it("引擎接收盘中价时只做硬线触碰提示，不改变按收盘算出的软线状态", () => {
+      const candles = mk([...Array(60).fill(20), 21, 22, 23]);
+      const pos: Position = {
+        id: "p", accountId: "a", symbol: "600000", name: "x", market: "a-share", status: "open",
+        initialStopPrice: 18.4, maType: "EMA", maPeriod: 20, confirmDays: 1, maxStage: 0, stage3Trimmed: false,
+        lots: [{ id: "l1", positionId: "p", type: "initial", date: candles[60].date, price: 20, shares: 625, stopPrice: 18.4, riskPercent: 1 }],
+        createdAt: "", updatedAt: "",
+      };
+      const closed = evaluatePositionRules({ position: pos, candles, yesterdayHardLine: 18.4 });
+      const live = evaluatePositionRules({ position: pos, candles, yesterdayHardLine: 18.4, intradayPrice: 18.0 });
+      expect(live.hardLinePrice).toBe(closed.hardLinePrice);
+      expect(live.softLineTriggered).toBe(closed.softLineTriggered);
+      expect(live.nextAction).toBe(closed.nextAction);
+      expect(live.intradayHardLineHit).toBe(true);
+      expect(closed.intradayHardLineHit).toBe(false);
     });
   });
 });

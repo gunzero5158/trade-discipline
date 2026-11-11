@@ -172,13 +172,14 @@ export default function PositionDetailPage({
   const initial1R = initialLot ? initialLot.shares * (initialLot.price - initialLot.stopPrice) : 1000;
   const pnlR = initial1R > 0 ? pnlAmount / initial1R : 0;
 
-  // 计算均线与软线 Series 用于图表
+  // 计算均线与软线 Series 用于图表；振幅同时提供给加仓计算器
   let maSeries: { time: string; value: number }[] = [];
   let softLineSeries: { time: string; value: number }[] = [];
+  let avgAmp: number | undefined;
   if (candles.length > 0) {
     const closes = candles.map((c) => c.close);
     const maVals = maType === "EMA" ? calculateEMA(closes, maPeriod) : calculateSMA(closes, maPeriod);
-    const avgAmp = calculateAverageAmplitude(candles, 20);
+    avgAmp = calculateAverageAmplitude(candles, 20);
     const margin = avgAmp * 0.5;
 
     for (let i = 0; i < candles.length; i++) {
@@ -594,6 +595,9 @@ export default function PositionDetailPage({
           currentPrice={currentPrice}
           currentHardLine={hardLine}
           lots={lots}
+          alreadyClosedShares={summary.alreadyClosedShares ?? 0}
+          avgAmplitude={avgAmp}
+          maPrice={latestSnap?.maValue}
           totalCapital={data.totalCapital || 100000}
           onClose={() => setShowAddModal(false)}
           onSuccess={() => fetchDetail()}

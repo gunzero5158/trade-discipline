@@ -89,6 +89,24 @@ export function runPointBacktest(
   }
   const benchmarkWinRate = randomTotal > 0 ? Number((randomSuccess / randomTotal).toFixed(4)) : 0.5;
 
+  // 1b. 历史有效上涨波段数：从阶段低点起累计涨幅 ≥ 阈值算一次，之后以新低点重新起算
+  let swingCount = 0;
+  let swingLow = closes[0];
+  let armed = true;
+  for (let i = 1; i < n; i++) {
+    const c = closes[i];
+    if (c < swingLow) {
+      swingLow = c;
+      armed = true;
+    } else if (armed && (c - swingLow) / swingLow >= swingThreshold) {
+      swingCount++;
+      armed = false; // 这一波已计数，等回落创出新低后再找下一波
+      swingLow = c;
+    } else if (!armed && c > swingLow) {
+      swingLow = c; // 继续上涨时把"低点"抬上去，回落到它以下才算新一轮
+    }
+  }
+
   // 2. 均线计算与触碰反应统计
   const supportRules: SupportRuleStat[] = [];
   const maMap = new Map<number, number[]>();
@@ -240,7 +258,7 @@ export function runPointBacktest(
     totalBars: n,
     startDate,
     endDate,
-    swingCount: Math.round(randomSuccess * 0.4),
+    swingCount,
     supportRules,
     currentStatus: {
       currentPrice,

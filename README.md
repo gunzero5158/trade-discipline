@@ -106,9 +106,11 @@ src/
 
 ## 自动化定时任务 (Cron)
 
-系统提供 `/api/cron/snapshot` 端点用于每日收盘后（15:05）自动对所有活跃持仓进行当日快照与次日风控线计算。
+`vercel.json` 已配置 Vercel Cron，每天 UTC 22:00（北京时间次日 06:00）调用 `/api/cron/snapshot`，对所有活跃持仓按最近一个已收盘交易日跑一遍规则并落快照。这个时间 A 股、港股看的是前一天收盘，美股刚收盘，三个市场都能在开盘前知道该干什么。Vercel 会自动在请求头带上 `Authorization: Bearer <CRON_SECRET>`，所以部署时必须在环境变量里配好 `CRON_SECRET`，没配接口会直接拒绝执行。
 
-通过请求头或 Query 携带密钥调用：
+Cron 只是留痕：打开看板时同样会实时重算一遍，Cron 挂了不影响使用。
+
+本地手动触发（密钥只接受请求头，不接受网址参数）：
 ```bash
 curl -X POST "http://localhost:3000/api/cron/snapshot" -H "Authorization: Bearer dev-secret-key-change-in-production"
 ```

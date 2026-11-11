@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { getOrCreateAccount, AccountData } from "./accessCode";
+import { findAccountByCode, AccountData } from "./accessCode";
 
 export const ACCESS_CODE_COOKIE = "trade_discipline_code";
 
@@ -21,14 +21,15 @@ export function getAccessCodeFromRequest(req: NextRequest): string | null {
 }
 
 /**
- * 校验并获取当前请求对应的账户对象
+ * 校验并获取当前请求对应的账户对象；访问码不存在返回 null，不会创建账户
  */
 export async function getSessionAccount(req: NextRequest): Promise<{ account: AccountData; accessCode: string } | null> {
   const code = getAccessCodeFromRequest(req);
   if (!code) return null;
 
   try {
-    const account = await getOrCreateAccount(code);
+    const account = await findAccountByCode(code);
+    if (!account) return null;
     return { account, accessCode: code };
   } catch (err) {
     console.error("Session account error:", err);

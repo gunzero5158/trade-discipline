@@ -2,9 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionAccount } from "@/lib/auth/session";
 import { ensureDbReady, schema } from "@/lib/db";
 import { eq, desc } from "drizzle-orm";
-import { fetchDailyCandles } from "@/lib/market/client";
-import { evaluatePositionRules } from "@/lib/rules/engine";
-import { Lot, Position as RulePosition } from "@/lib/rules/types";
+import { evaluateAndSnapshot, getLatestSnapshot } from "@/lib/server/positionSnapshot";
 
 export async function GET(
   req: NextRequest,
@@ -41,7 +39,7 @@ export async function GET(
       .select()
       .from(schema.snapshots)
       .where(eq(schema.snapshots.positionId, id))
-      .orderBy(desc(schema.snapshots.createdAt))
+      .orderBy(desc(schema.snapshots.date), desc(schema.snapshots.createdAt))
       .limit(60);
 
     const trades = await db
@@ -50,7 +48,7 @@ export async function GET(
       .where(eq(schema.trades.positionId, id))
       .orderBy(desc(schema.trades.exitDate));
 
-    // 计算加权成本与剩余股数 (扣减已部分平仓股数)
+    // 加权成本与剩余股数 (扣减已部分平仓股数)
     let totalBoughtShares = 0;
     let totalCostAmount = 0;
     for (const l of lots) {
@@ -72,6 +70,7 @@ export async function GET(
         totalCapital: session.account.totalCapital,
         summary: {
           totalShares,
+          alreadyClosedShares,
           weightedCost: Number(weightedCost.toFixed(2)),
           totalCostAmount: Number(currentCostAmount.toFixed(2)),
         },
@@ -110,14 +109,9 @@ export async function PATCH(
 
     const pos = position[0];
 
-    // 获取最新快照以校验人工硬线不能低于当前硬线
-    const latestSnapList = await db
-      .select()
-      .from(schema.snapshots)
-      .where(eq(schema.snapshots.positionId, id))
-      .orderBy(desc(schema.snapshots.createdAt))
-      .limit(1);
-    const currentHardLine = latestSnapList.length > 0 ? latestSnapList[0].hardLinePrice : pos.initialStopPrice;
+    // 人工硬线不能低于当前生效硬线
+    const latestSnap = await getLatestSnapshot(db, id);
+    const currentHardLine = latestSnap?.hardLinePrice ?? pos.initialStopPrice;
 
     const updates: Partial<typeof schema.positions.$inferInsert> = {
       updatedAt: Date.now(),
@@ -164,72 +158,11 @@ export async function PATCH(
       .set(updates)
       .where(eq(schema.positions.id, id));
 
-    // 规则修改后立即重新评估并写入新快照
+    // 规则修改后立即重新评估
     try {
-      const updatedPos = { ...pos, ...updates };
-      const lots = await db.select().from(schema.lots).where(eq(schema.lots.positionId, id));
-      const lotsForPos: Lot[] = lots.map((l) => ({
-        id: l.id,
-        positionId: l.positionId,
-        type: l.type as any,
-        date: l.date,
-        price: l.price,
-        shares: l.shares,
-        stopPrice: l.stopPrice,
-        riskPercent: l.riskPercent,
-      }));
-
-      const candles = await fetchDailyCandles(updatedPos.symbol, 120);
-      if (candles.length > 0) {
-        const rulePos: RulePosition = {
-          id: updatedPos.id,
-          accountId: updatedPos.accountId,
-          symbol: updatedPos.symbol,
-          name: updatedPos.name,
-          market: updatedPos.market as any,
-          status: updatedPos.status as any,
-          initialStopPrice: updatedPos.initialStopPrice,
-          maType: updatedPos.maType as any,
-          maPeriod: updatedPos.maPeriod,
-          confirmDays: updatedPos.confirmDays,
-          manualStopPrice: updatedPos.manualStopPrice,
-          maxStage: updatedPos.maxStage,
-          stage3Trimmed: !!updatedPos.stage3Trimmed,
-          targetPrice: updatedPos.targetPrice,
-          accelerationLocked: !!updatedPos.accelerationLocked,
-          lots: lotsForPos,
-          createdAt: new Date(updatedPos.createdAt).toISOString(),
-          updatedAt: new Date(updatedPos.updatedAt).toISOString(),
-        };
-
-        const evalSnapshot = evaluatePositionRules({
-          position: rulePos,
-          candles,
-          yesterdayHardLine: currentHardLine,
-          config: session.account.ruleConfig,
-        });
-
-        await db.insert(schema.snapshots).values({
-          id: `snap_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          positionId: id,
-          date: evalSnapshot.date,
-          closePrice: evalSnapshot.closePrice,
-          highPrice: evalSnapshot.highPrice,
-          costPrice: evalSnapshot.costPrice,
-          maxGainRatio: evalSnapshot.maxGainRatio,
-          stage: evalSnapshot.stage,
-          hardLinePrice: evalSnapshot.hardLinePrice,
-          hardLineDistancePercent: evalSnapshot.hardLineDistancePercent,
-          maValue: evalSnapshot.maValue,
-          softLinePrice: evalSnapshot.softLinePrice,
-          softLineTriggered: evalSnapshot.softLineTriggered ? 1 : 0,
-          consecutiveTriggerDays: evalSnapshot.consecutiveTriggerDays,
-          nextAction: evalSnapshot.nextAction,
-          actionReason: evalSnapshot.actionReason,
-          dataSource: "rule_update",
-          createdAt: Date.now(),
-        });
-      }
+      const [updatedPos] = await db.select().from(schema.positions).where(eq(schema.positions.id, id)).limit(1);
+      const lotRows = await db.select().from(schema.lots).where(eq(schema.lots.positionId, id));
+      await evaluateAndSnapshot(db, updatedPos, lotRows, { dataSource: "rule_update", config: session.account.ruleConfig });
     } catch (err) {
       console.warn("Failed to re-evaluate snapshot after PATCH:", err);
     }

@@ -20,6 +20,11 @@ function createDbClient() {
     });
   }
 
+  // 线上 (Vercel) 文件系统是临时的，没配 Turso 就会悄悄丢数据：直接拒绝启动
+  if (process.env.VERCEL || process.env.NODE_ENV === "production") {
+    throw new Error("未配置 TURSO_DATABASE_URL / TURSO_AUTH_TOKEN，生产环境拒绝回退到本地 SQLite 文件");
+  }
+
   // 本地开发与测试默认自动回退至 SQLite 文件
   const file = process.env.DEV_DATABASE_FILE || path.join(process.cwd(), "dev.db");
   return createClient({ url: `file:${file}` });

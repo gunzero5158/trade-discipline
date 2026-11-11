@@ -41,9 +41,10 @@ export interface AccountData {
 }
 
 /**
- * 根据访问码获取或初始化账户
+ * 按访问码查账户；不存在返回 null，绝不顺手新建。
+ * 登录、读持仓等所有带码请求都走这里，防止输错的码或任意请求头把数据库灌满空账户。
  */
-export async function getOrCreateAccount(accessCode: string): Promise<AccountData> {
+export async function findAccountByCode(accessCode: string): Promise<AccountData | null> {
   const db = await ensureDbReady();
   const codeHash = hashAccessCode(accessCode);
 
@@ -53,24 +54,35 @@ export async function getOrCreateAccount(accessCode: string): Promise<AccountDat
     .where(eq(schema.accounts.accessCodeHash, codeHash))
     .limit(1);
 
-  if (existing.length > 0) {
-    const acc = existing[0];
-    let ruleConfig = DEFAULT_RULE_CONFIG;
-    if (acc.ruleConfigJson) {
-      try {
-        ruleConfig = { ...DEFAULT_RULE_CONFIG, ...JSON.parse(acc.ruleConfigJson) };
-      } catch {
-        // fallback
-      }
+  if (existing.length === 0) return null;
+
+  const acc = existing[0];
+  let ruleConfig = DEFAULT_RULE_CONFIG;
+  if (acc.ruleConfigJson) {
+    try {
+      ruleConfig = { ...DEFAULT_RULE_CONFIG, ...JSON.parse(acc.ruleConfigJson) };
+    } catch {
+      // 配置损坏则用默认值
     }
-    return {
-      id: acc.id,
-      totalCapital: acc.totalCapital,
-      ruleConfig,
-      createdAt: acc.createdAt,
-      updatedAt: acc.updatedAt,
-    };
   }
+  return {
+    id: acc.id,
+    totalCapital: acc.totalCapital,
+    ruleConfig,
+    createdAt: acc.createdAt,
+    updatedAt: acc.updatedAt,
+  };
+}
+
+/**
+ * 根据访问码获取或初始化账户。只有"生成新访问码"这一个入口应该调用它。
+ */
+export async function getOrCreateAccount(accessCode: string): Promise<AccountData> {
+  const existing = await findAccountByCode(accessCode);
+  if (existing) return existing;
+
+  const db = await ensureDbReady();
+  const codeHash = hashAccessCode(accessCode);
 
   // 创建新账户
   const now = Date.now();

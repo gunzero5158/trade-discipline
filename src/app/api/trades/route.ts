@@ -59,8 +59,9 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    // 计算统计指标与诊断
-    const stats = calculateTradeStatistics(tradeRecords, session.account.totalCapital);
+    // 计算统计指标与诊断；月度 6% 红线按当月算
+    const currentMonth = new Date().toISOString().substring(0, 7);
+    const stats = calculateTradeStatistics(tradeRecords, session.account.totalCapital, { month: currentMonth });
 
     // 如果请求 CSV 格式
     if (format === "csv") {

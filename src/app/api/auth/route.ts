@@ -1,36 +1,44 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateAccessCode, getOrCreateAccount, hashAccessCode } from "@/lib/auth/accessCode";
+import { generateAccessCode, getOrCreateAccount, findAccountByCode, hashAccessCode } from "@/lib/auth/accessCode";
 import { getAccessCodeFromRequest, ACCESS_CODE_COOKIE } from "@/lib/auth/session";
 import { ensureDbReady, schema } from "@/lib/db";
 import { eq } from "drizzle-orm";
 
-export async function GET(req: NextRequest) {
-  let accessCode = getAccessCodeFromRequest(req);
-  let isNew = false;
+const COOKIE_OPTIONS = {
+  path: "/",
+  maxAge: 365 * 24 * 60 * 60,
+  httpOnly: false, // 允许前端读取并展示
+  sameSite: "lax" as const,
+  secure: process.env.NODE_ENV === "production",
+};
 
-  if (!accessCode) {
-    accessCode = generateAccessCode();
-    isNew = true;
-  }
+/**
+ * GET：
+ * - 没带访问码 → 生成一个新码并建账户 (这是唯一会新建账户的入口)
+ * - 带了访问码且存在 → 返回账户
+ * - 带了访问码但不存在 (数据库被重置等) → 401 + 清掉 cookie，前端再请求一次即可拿到新码
+ */
+export async function GET(req: NextRequest) {
+  const existingCode = getAccessCodeFromRequest(req);
 
   try {
+    if (existingCode) {
+      const account = await findAccountByCode(existingCode);
+      if (!account) {
+        const res = NextResponse.json({ success: false, invalid: true, error: "访问码不存在" }, { status: 401 });
+        res.cookies.delete(ACCESS_CODE_COOKIE);
+        return res;
+      }
+      const res = NextResponse.json({ success: true, accessCode: existingCode, isNew: false, account });
+      res.cookies.set(ACCESS_CODE_COOKIE, existingCode, COOKIE_OPTIONS);
+      return res;
+    }
+
+    const accessCode = generateAccessCode();
     const account = await getOrCreateAccount(accessCode);
-    const response = NextResponse.json({
-      success: true,
-      accessCode,
-      isNew,
-      account,
-    });
-
-    // 自动在 Cookie 中维持访问码
-    response.cookies.set(ACCESS_CODE_COOKIE, accessCode, {
-      path: "/",
-      maxAge: 365 * 24 * 60 * 60,
-      httpOnly: false, // 允许前端读取
-      sameSite: "lax",
-    });
-
-    return response;
+    const res = NextResponse.json({ success: true, accessCode, isNew: true, account });
+    res.cookies.set(ACCESS_CODE_COOKIE, accessCode, COOKIE_OPTIONS);
+    return res;
   } catch (error: unknown) {
     console.error("Auth GET error:", error);
     return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
@@ -42,17 +50,15 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { action, accessCode: inputCode, totalCapital, ruleConfig } = body;
 
-    // 1. 切换 / 登录已有的访问码
+    // 1. 切换 / 登录已有的访问码：必须真的存在，输错不会偷偷建新账户
     if (action === "login" && inputCode) {
       const code = String(inputCode).trim().toUpperCase();
-      const account = await getOrCreateAccount(code);
+      const account = await findAccountByCode(code);
+      if (!account) {
+        return NextResponse.json({ success: false, error: "访问码不存在，请核对后重试" }, { status: 404 });
+      }
       const res = NextResponse.json({ success: true, accessCode: code, account });
-      res.cookies.set(ACCESS_CODE_COOKIE, code, {
-        path: "/",
-        maxAge: 365 * 24 * 60 * 60,
-        httpOnly: false,
-        sameSite: "lax",
-      });
+      res.cookies.set(ACCESS_CODE_COOKIE, code, COOKIE_OPTIONS);
       return res;
     }
 
@@ -65,7 +71,7 @@ export async function POST(req: NextRequest) {
     const db = await ensureDbReady();
     const codeHash = hashAccessCode(currentCode);
     const existing = await db
-      .select()
+      .select({ id: schema.accounts.id })
       .from(schema.accounts)
       .where(eq(schema.accounts.accessCodeHash, codeHash))
       .limit(1);
@@ -89,7 +95,7 @@ export async function POST(req: NextRequest) {
       .set(updates)
       .where(eq(schema.accounts.accessCodeHash, codeHash));
 
-    const updatedAccount = await getOrCreateAccount(currentCode);
+    const updatedAccount = await findAccountByCode(currentCode);
     return NextResponse.json({ success: true, account: updatedAccount });
   } catch (error: unknown) {
     console.error("Auth POST error:", error);

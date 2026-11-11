@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { X, PlusCircle, AlertTriangle } from "lucide-react";
 import { calculateAddPosition } from "@/lib/rules/calculator";
+import { applyClosedShares } from "@/lib/rules/lots";
 import { Lot, MarketRegion } from "@/lib/rules/types";
 
 interface AddModalProps {
@@ -13,6 +14,9 @@ interface AddModalProps {
   currentPrice: number;
   currentHardLine: number;
   lots: Lot[];
+  alreadyClosedShares?: number; // 已部分平仓的股数，总账按剩余股数算
+  avgAmplitude?: number;        // 近 20 日平均振幅 (由 K 线算出)，决定加仓止损位的余量
+  maPrice?: number;             // 当前软线均线价，用于"离均线太远等于追高"校验
   totalCapital?: number;
   onClose: () => void;
   onSuccess: () => void;
@@ -26,10 +30,14 @@ export default function AddModal({
   currentPrice,
   currentHardLine,
   lots,
+  alreadyClosedShares = 0,
+  avgAmplitude,
+  maPrice,
   totalCapital = 100000,
   onClose,
   onSuccess,
 }: AddModalProps) {
+  const remainingLots = applyClosedShares(lots, alreadyClosedShares);
   const addLotsCount = lots.filter((l) => l.type === "add").length;
   const isMaxAddReached = addLotsCount >= 2;
   const addIndex = addLotsCount + 1;
@@ -48,12 +56,13 @@ export default function AddModal({
   if (!isMaxAddReached && addPrice > 0 && keyLevel > 0 && keyLevel < addPrice) {
     try {
       calcResult = calculateAddPosition({
-        existingLots: lots,
+        existingLots: remainingLots,
         addPrice,
         keyLevel,
         totalCapital,
         currentHardLine,
-        avgAmplitude: 0.02,
+        avgAmplitude,
+        maPrice,
         market,
       });
     } catch (err: unknown) {

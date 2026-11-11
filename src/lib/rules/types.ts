@@ -59,9 +59,10 @@ export interface DailySnapshot {
   date: string;               // YYYY-MM-DD
   closePrice: number;
   highPrice: number;          // 持仓以来最高价
-  costPrice: number;          // 加权平均成本
-  maxGainRatio: number;       // 最高浮盈比例
-  currentGainRatio: number;   // 当前浮盈比例
+  costPrice: number;          // 加权平均成本 (算实际盈亏用)
+  initialCostPrice: number;   // 首仓成本 (算阶段与阶段硬线用，加仓不影响老仓的浮盈节奏)
+  maxGainRatio: number;       // 最高浮盈比例 (相对首仓成本)
+  currentGainRatio: number;   // 当前浮盈比例 (相对加权平均成本)
   stage: number;              // 当前阶段 (0: 初始, 1: 保本, 2: 跟踪, 3: 落袋)
   stageName: string;
   hardLinePrice: number;      // 明日硬线价格
@@ -77,6 +78,8 @@ export interface DailySnapshot {
   nextAction: ActionType;
   actionReason: string;
   accelerationMode: boolean;  // 是否进入加速段 (5 日线)
+  intradayPrice?: number;     // 盘中实时价 (仅盘中刷新时有)
+  intradayHardLineHit: boolean; // 盘中价是否已低于硬线 (硬线盘中触发即执行，只提示不改规则结果)
   dataSource?: string;
 }
 

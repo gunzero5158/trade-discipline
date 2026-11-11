@@ -3,11 +3,13 @@ import { calculateStage } from "./stages";
 import { calculateHardLine, calculateHardLineDistance } from "./hardLine";
 import { calculateSoftLine, Candle } from "./softLine";
 import { determineNextAction } from "./actions";
+import { getInitialLot } from "./lots";
 
 export interface EvaluationInput {
   position: Position;
-  candles: Candle[];             // 日线序列，最新一根为当天收盘
+  candles: Candle[];             // 已收盘的日线序列，最新一根为最近一个已收盘交易日
   yesterdayHardLine?: number | null;
+  intradayPrice?: number | null; // 盘中实时价：只用来提示"盘中是否已触硬线"，不参与阶段/软线计算
   config?: RuleConfig;
 }
 
@@ -28,7 +30,7 @@ export function evaluatePositionRules(input: EvaluationInput): DailySnapshot {
 
   // 1. 获取买入日期之后的最高价
   // 首仓日期
-  const initialLot = position.lots.find((l) => l.type === "initial") || position.lots[0];
+  const initialLot = getInitialLot(position.lots);
   const entryDate = initialLot ? new Date(initialLot.date).getTime() : 0;
 
   let highPriceSinceEntry = currentClosePrice;
@@ -50,10 +52,10 @@ export function evaluatePositionRules(input: EvaluationInput): DailySnapshot {
     config,
   });
 
-  // 3. 硬线计算 (含五者取最大只升不降铁律)
+  // 3. 硬线计算 (含五者取最大只升不降铁律)；阶段硬线以首仓成本为基准
   const hardLineRes = calculateHardLine({
     stage: stageRes.effectiveStage,
-    costPrice: stageRes.costPrice,
+    costPrice: stageRes.initialCostPrice,
     maxGainRatio: stageRes.maxGainRatio,
     initialStopPrice: position.initialStopPrice,
     lots: position.lots,
@@ -87,12 +89,15 @@ export function evaluatePositionRules(input: EvaluationInput): DailySnapshot {
     confirmDays: position.confirmDays,
   });
 
+  const intradayPrice = input.intradayPrice ?? null;
+
   const snapshot: DailySnapshot = {
     positionId: position.id,
     date: typeof latestCandle.date === "string" ? latestCandle.date.substring(0, 10) : new Date(latestCandle.date).toISOString().substring(0, 10),
     closePrice: currentClosePrice,
     highPrice: stageRes.highPrice,
     costPrice: stageRes.costPrice,
+    initialCostPrice: stageRes.initialCostPrice,
     maxGainRatio: stageRes.maxGainRatio,
     currentGainRatio: stageRes.currentGainRatio,
     stage: stageRes.effectiveStage,
@@ -110,6 +115,8 @@ export function evaluatePositionRules(input: EvaluationInput): DailySnapshot {
     nextAction: actionRes.action,
     actionReason: actionRes.actionReason,
     accelerationMode: softLineRes.accelerationMode,
+    intradayPrice: intradayPrice ?? undefined,
+    intradayHardLineHit: intradayPrice !== null && intradayPrice > 0 && intradayPrice < hardLineRes.hardLinePrice,
   };
 
   return snapshot;

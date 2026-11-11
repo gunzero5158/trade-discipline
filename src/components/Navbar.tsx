@@ -11,16 +11,23 @@ export default function Navbar() {
   const [copied, setCopied] = useState<boolean>(false);
 
   useEffect(() => {
-    // 首次加载拉取或确认访问码
-    fetch("/api/auth")
-      .then((res) => res.json())
-      .then((data) => {
+    // 首次加载拉取或确认访问码；cookie 里的码已失效 (如数据库重置) 时服务端会清掉 cookie，再请求一次拿新码
+    const load = async (retry: boolean) => {
+      try {
+        const res = await fetch("/api/auth");
+        const data = await res.json();
         if (data.success && data.accessCode) {
           setAccessCode(data.accessCode);
           localStorage.setItem("trade_discipline_code", data.accessCode);
+        } else if (data.invalid && retry) {
+          localStorage.removeItem("trade_discipline_code");
+          await load(false);
         }
-      })
-      .catch((err) => console.warn("Failed to fetch auth session:", err));
+      } catch (err) {
+        console.warn("Failed to fetch auth session:", err);
+      }
+    };
+    load(true);
   }, []);
 
   const handleCopyCode = () => {
